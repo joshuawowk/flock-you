@@ -36,10 +36,10 @@
 #define USE_LED            0
 #define MIRROR_SERIAL      1
 #ifndef LINK_TX_PIN
-#define LINK_TX_PIN        17   // co-proc TX  -> host RX
+#define LINK_TX_PIN        2    // co-proc TX  -> host RX (GPIO43)
 #endif
 #ifndef LINK_RX_PIN
-#define LINK_RX_PIN        18   // host TX     -> co-proc RX (future command channel)
+#define LINK_RX_PIN        42   // host TX (GPIO44) -> co-proc RX (future command channel)
 #endif
 #define MIRROR_TX_PIN      LINK_TX_PIN
 #define MIRROR_RX_PIN      LINK_RX_PIN

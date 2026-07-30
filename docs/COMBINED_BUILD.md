@@ -80,8 +80,8 @@ link), which carries detections *and* GPS.
 
 | Signal                     | Co-proc (N16R8)      | Host (T-Display-S3)        | Notes |
 |----------------------------|----------------------|----------------------------|-------|
-| Detections/status/gps      | `LINK_TX_PIN` (17)   | link UART **RX** (43)      | co-proc → host |
-| Commands (phase 2)         | `LINK_RX_PIN` (18)   | link UART **TX** (44)      | host → co-proc |
+| Detections/status/gps      | `LINK_TX_PIN` (2)    | link UART **RX** (43)      | co-proc → host |
+| Commands (phase 2)         | `LINK_RX_PIN` (42)   | link UART **TX** (44)      | host → co-proc |
 | GND                        | GND                  | GND                        | common ground required |
 | 3V3                        | 3V3                  | 3V3                        | host may power co-proc if regulator has headroom |
 | GPS puck (optional)        | `GPS_RX_PIN` (44)    | —                          | NMEA, default 9600 8N1 |
@@ -149,7 +149,7 @@ detection pipeline is unchanged.
 
 | File            | Change |
 |-----------------|--------|
-| `platformio.ini`| New `[env:coproc_s3_n16r8]`: `board = esp32-s3-devkitc-1`, 16 MB flash, `qio_opi` PSRAM, `-DBOARD_COPROC_UART -DLINK_TX_PIN=17 -DLINK_RX_PIN=18` (optional `-DUSE_COPROC_GPS`). |
+| `platformio.ini`| New `[env:coproc_s3_n16r8]`: `board = esp32-s3-devkitc-1`, 16 MB flash, `qio_opi` PSRAM, `-DBOARD_COPROC_UART -DLINK_TX_PIN=2 -DLINK_RX_PIN=42` (optional `-DUSE_COPROC_GPS`). |
 | `main.cpp`      | New `BOARD_COPROC_UART` config block (peer of `BOARD_LILYGO_T_DONGLE_S3`): no display/buzzer, `MIRROR_SERIAL` → the host link on `LINK_TX/RX`. |
 | `main.cpp`      | `emitStatusJSON()` + a `status` line on the heartbeat (co-proc only). |
 | `main.cpp`      | Optional self-contained GPS section (`USE_COPROC_GPS`): minimal `$xxRMC` NMEA parser on its own UART, emits `gps` lines. |

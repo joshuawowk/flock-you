@@ -1,6 +1,8 @@
 
 .pio/
 
+.pio-core/
+
 .vscode/
 
 .DS_Store

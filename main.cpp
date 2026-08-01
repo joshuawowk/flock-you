@@ -26,20 +26,22 @@
 // ESP32-S3 N16R8 headless WiFi co-processor for the combined Flock-You unit.
 // No display, no buzzer: this board's only job is continuous promiscuous
 // WiFi sniffing, streaming detection/status/gps JSON lines to the Bruce host
-// (T-Display-S3) over a dedicated UART link — and, in parallel, over USB CDC
-// so a PC can still run the Flask dashboard (api/flockyou.py) on the same feed.
+// (an ES3C28P / AITRIP 2.8" ESP32-S3 capacitive-touch board) over a dedicated
+// UART link — and, in parallel, over USB CDC so a PC can still run the Flask
+// dashboard (api/flockyou.py) on the same feed.
 //
-// Link wiring (co-proc -> host):  LINK_TX_PIN -> host RX
-//              (host -> co-proc): LINK_RX_PIN <- host TX  (reserved for cmds)
-// Both are 3.3 V S3 GPIOs; pick pins free on your devkit (defaults below).
+// Link wiring (co-proc -> host):  LINK_TX_PIN -> host RX (host SERIAL_RX)
+//              (host -> co-proc): LINK_RX_PIN <- host TX (host SERIAL_TX, reserved)
+// On the ES3C28P host that is co-proc GPIO2 -> host GPIO44 and co-proc GPIO42 <-
+// host GPIO43. Both are 3.3 V S3 GPIOs; override with -DLINK_TX_PIN/-DLINK_RX_PIN.
 #define USE_BUZZER         0
 #define USE_LED            0
 #define MIRROR_SERIAL      1
 #ifndef LINK_TX_PIN
-#define LINK_TX_PIN        2    // co-proc TX  -> host RX (GPIO43)
+#define LINK_TX_PIN        2    // co-proc TX  -> host RX (ES3C28P GPIO44)
 #endif
 #ifndef LINK_RX_PIN
-#define LINK_RX_PIN        42   // host TX (GPIO44) -> co-proc RX (future command channel)
+#define LINK_RX_PIN        42   // host TX (ES3C28P GPIO43) -> co-proc RX (reserved)
 #endif
 #define MIRROR_TX_PIN      LINK_TX_PIN
 #define MIRROR_RX_PIN      LINK_RX_PIN

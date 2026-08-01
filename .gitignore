@@ -6,3 +6,6 @@
 .vscode/
 
 .DS_Store
+
+# generated merged flash image (see releases)
+coproc-merged.bin

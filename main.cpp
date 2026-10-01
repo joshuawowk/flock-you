@@ -21,6 +21,31 @@
 #define APA102_FLASH_G     0
 #define APA102_FLASH_B     0
 #define MIRROR_SERIAL      0   // GPIO43 is UART TX on this board
+
+#elif defined(BOARD_COPROC_UART)
+// ESP32-S3 N16R8 headless WiFi co-processor for the combined Flock-You unit.
+// No display, no buzzer: this board's only job is continuous promiscuous
+// WiFi sniffing, streaming detection/status/gps JSON lines to the Bruce host
+// (an ES3C28P / AITRIP 2.8" ESP32-S3 capacitive-touch board) over a dedicated
+// UART link — and, in parallel, over USB CDC so a PC can still run the Flask
+// dashboard (api/flockyou.py) on the same feed.
+//
+// Link wiring (co-proc -> host):  LINK_TX_PIN -> host RX (host SERIAL_RX)
+//              (host -> co-proc): LINK_RX_PIN <- host TX (host SERIAL_TX, reserved)
+// On the ES3C28P host that is co-proc GPIO2 -> host GPIO44 and co-proc GPIO42 <-
+// host GPIO43. Both are 3.3 V S3 GPIOs; override with -DLINK_TX_PIN/-DLINK_RX_PIN.
+#define USE_BUZZER         0
+#define USE_LED            0
+#define MIRROR_SERIAL      1
+#ifndef LINK_TX_PIN
+#define LINK_TX_PIN        2    // co-proc TX  -> host RX (ES3C28P GPIO44)
+#endif
+#ifndef LINK_RX_PIN
+#define LINK_RX_PIN        42   // host TX (ES3C28P GPIO43) -> co-proc RX (reserved)
+#endif
+#define MIRROR_TX_PIN      LINK_TX_PIN
+#define MIRROR_RX_PIN      LINK_RX_PIN
+
 #else
 // Seeed XIAO ESP32-S3
 #define BUZZER_PIN         3
@@ -30,6 +55,11 @@
 #define LED_ACTIVE_HIGH    0
 #define MIRROR_SERIAL      1
 #define MIRROR_TX_PIN      43
+#endif
+
+// Mirror RX defaults to TX-only (rx=-1) unless a board block opts in above.
+#ifndef MIRROR_RX_PIN
+#define MIRROR_RX_PIN      -1
 #endif
 
 #define LED_FLASH_MS       120
@@ -481,10 +511,25 @@ static void updateChannelMode() {
 #endif
 }
 
+// Machine-readable liveness line for the Bruce host link. Distinct `event` so
+// the host parser can update its co-proc status row; the Flask dashboard ignores
+// it (it keys on `detection_method`, which this line intentionally lacks).
+#if defined(BOARD_COPROC_UART)
+static void emitStatusJSON() {
+  dualPrintf(
+      "{\"event\":\"status\",\"source\":\"wifi_coproc\","
+      "\"channel\":%u,\"mode\":\"%s\",\"det\":%d,\"uptime_ms\":%lu}\n",
+      currentChannel, channelModeName(), fyDetCount, (unsigned long)millis());
+}
+#endif
+
 static void printHeartbeat() {
   if (millis() - lastHeartbeat >= HEARTBEAT_MS) {
     dualPrintf("[flockyou] scanning (ch=%u mode=%s det=%d)\n",
                   currentChannel, channelModeName(), fyDetCount);
+#if defined(BOARD_COPROC_UART)
+    emitStatusJSON();
+#endif
     lastHeartbeat = millis();
     if (!dongleDisplayInAlert(millis())) {
       dongleDisplayShowIdle(currentChannel, fyDetCount);
@@ -1311,6 +1356,120 @@ static void heartbeatTick() {
 }
 
 // ============================================================
+// OPTIONAL GPS  (co-processor only)  — NMEA puck on its own UART
+// ============================================================
+//
+// Emits {"event":"gps",...} lines on the host link + USB so the Bruce host
+// can stamp BOTH WiFi and BLE detections with the latest fix (the host holds
+// "latest fix" and applies it uniformly, same model as api/flockyou.py). The
+// co-proc does NOT stamp detections itself, keeping emitDetectionJSON untouched.
+//
+// Disabled by default. Enable with -DUSE_COPROC_GPS and (optionally) override
+// GPS_UART_NUM / GPS_RX_PIN / GPS_BAUD in build_flags.
+
+#ifdef USE_COPROC_GPS
+#ifndef GPS_UART_NUM
+#define GPS_UART_NUM   2
+#endif
+#ifndef GPS_RX_PIN
+#define GPS_RX_PIN     44     // co-proc RX  <- GPS TX
+#endif
+#ifndef GPS_TX_PIN
+#define GPS_TX_PIN     -1     // GPS is TX-only to us; no wire back needed
+#endif
+#ifndef GPS_BAUD
+#define GPS_BAUD       9600
+#endif
+#ifndef GPS_EMIT_MS
+#define GPS_EMIT_MS    2000
+#endif
+
+static HardwareSerial GPSSerial(GPS_UART_NUM);
+static char          gpsLine[100];
+static uint8_t       gpsLineLen  = 0;
+static bool          gpsHaveFix  = false;
+static double        gpsLat      = 0.0;
+static double        gpsLon      = 0.0;
+static unsigned long gpsLastEmit = 0;
+
+// NMEA ddmm.mmmm / dddmm.mmmm -> signed decimal degrees. The /100 split works
+// for both 2- and 3-digit degree fields (e.g. 4807.038 -> 48.117, 01131.000 -> 11.516).
+static double nmeaToDeg(const char* field, char hemi) {
+  if (!field || !field[0]) return 0.0;
+  double v = atof(field);
+  // Reject NaN/inf/negative/out-of-range before the (int) cast: a garbled
+  // field could otherwise make v/100 exceed INT_MAX (undefined float->int).
+  // Max valid magnitude is ddmm.mmmm for 180 deg -> ~18000.
+  if (!(v >= 0.0 && v <= 18000.0)) return 0.0;
+  int    deg = (int)(v / 100.0);
+  double min = v - deg * 100.0;
+  double dec = deg + min / 60.0;
+  if (hemi == 'S' || hemi == 'W') dec = -dec;
+  return dec;
+}
+
+// Parse a mutable $--RMC sentence in place. Fields: 2=status(A/V), 3=lat,
+// 4=N/S, 5=lon, 6=E/W. Splits on commas by nulling them.
+static void gpsParseRMC(char* s) {
+  char* fields[13] = {0};
+  int   n = 0;
+  fields[n++] = s;
+  for (char* p = s; *p && n < 13; p++) {
+    if (*p == ',') { *p = '\0'; fields[n++] = p + 1; }
+  }
+  if (n < 7) return;
+  if (fields[2][0] != 'A') { gpsHaveFix = false; return; }  // 'V' = no fix
+  // Status 'A' but empty/garbled position (corrupted line, or a non-conformant
+  // receiver): treat as no-fix rather than emitting a bogus 0,0 "Null Island"
+  // fix that the host would stamp onto every detection.
+  if (!fields[3][0] || !fields[5][0] ||
+      (fields[4][0] != 'N' && fields[4][0] != 'S') ||
+      (fields[6][0] != 'E' && fields[6][0] != 'W')) {
+    gpsHaveFix = false;
+    return;
+  }
+  gpsLat     = nmeaToDeg(fields[3], fields[4][0]);
+  gpsLon     = nmeaToDeg(fields[5], fields[6][0]);
+  gpsHaveFix = true;
+}
+
+static void gpsEmit() {
+  dualPrintf("{\"event\":\"gps\",\"valid\":%s,\"lat\":%.6f,\"lon\":%.6f}\n",
+             gpsHaveFix ? "true" : "false", gpsLat, gpsLon);
+}
+
+static void gpsSetup() {
+  GPSSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
+  dualPrintf("[flockyou] GPS co-proc on UART%d rx=%d @ %d baud\n",
+             (int)GPS_UART_NUM, (int)GPS_RX_PIN, (int)GPS_BAUD);
+}
+
+static void gpsTick() {
+  while (GPSSerial.available() > 0) {
+    char c = (char)GPSSerial.read();
+    if (c == '\n' || c == '\r') {
+      if (gpsLineLen > 6) {
+        gpsLine[gpsLineLen] = '\0';
+        if (gpsLine[0] == '$' && gpsLine[3] == 'R' &&
+            gpsLine[4] == 'M' && gpsLine[5] == 'C') {   // $xxRMC (GP/GN/GL/...)
+          gpsParseRMC(gpsLine);
+        }
+      }
+      gpsLineLen = 0;
+    } else if (gpsLineLen < sizeof(gpsLine) - 1) {
+      gpsLine[gpsLineLen++] = c;
+    } else {
+      gpsLineLen = 0;   // overrun — drop the line
+    }
+  }
+  if (millis() - gpsLastEmit >= GPS_EMIT_MS) {
+    gpsEmit();
+    gpsLastEmit = millis();
+  }
+}
+#endif // USE_COPROC_GPS
+
+// ============================================================
 // SETUP / LOOP
 // ============================================================
 
@@ -1326,7 +1485,13 @@ void setup() {
 #endif
 
 #if MIRROR_SERIAL
-  Serial1.begin(MIRROR_BAUD, SERIAL_8N1, -1, MIRROR_TX_PIN);  // TX-only on GPIO43
+  // TX-only on most boards (MIRROR_RX_PIN == -1); the co-proc build wires RX too
+  // so the host can later send commands back over the same link.
+  Serial1.begin(MIRROR_BAUD, SERIAL_8N1, MIRROR_RX_PIN, MIRROR_TX_PIN);
+#endif
+
+#ifdef USE_COPROC_GPS
+  gpsSetup();
 #endif
 
 #if USE_BUZZER
@@ -1401,6 +1566,9 @@ void loop() {
   autosaveTick();      // periodic SPIFFS write if dirty
   heartbeatTick();     // audible beep-pair while a target is still in range
   ledTick();           // turn off LED after LED_FLASH_MS
+#ifdef USE_COPROC_GPS
+  gpsTick();           // read NMEA, emit periodic gps line to the host link
+#endif
   dongleDisplayTick(millis(), currentChannel, fyDetCount);
   printHeartbeat();
   delay(1);
